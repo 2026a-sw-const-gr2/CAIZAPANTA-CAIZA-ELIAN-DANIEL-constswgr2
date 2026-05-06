@@ -1,339 +1,257 @@
-# REPORTE DE MANTENIMIENTO — EPN Event Manager
-## Taller Construcción de Software | FIS EPN
----
+# Reporte de Mantenimiento - EPN Event Manager
 
-**Sistema:** EPN Event Manager Hub  
-**CRUD conectado:** Catálogo de Plantas de Interior (`crud-plantas`)  
+**Materia:** Construccion y Evolucion de Software  
+**Sistema intervenido:** EPN Event Manager  
+**CRUD conectado:** Catalogo de Plantas de Interior (`crud-plantas`)  
 **Stack del hub:** NestJS + TypeORM + SQLite  
+**Stack del CRUD:** Python + Flask + SQLite
 
----
+## Diagnostico general
 
-## RESUMEN EJECUTIVO
+El EPN Event Manager centraliza eventos de CRUD externos, pero mantiene una deuda tecnica intencional: separa eventos en cuatro tablas (`create_events`, `update_events`, `delete_events`, `query_events`) y expone endpoints que originalmente no validaban correctamente los datos ni respondian con formatos estandar.
 
-El EPN Event Manager es un hub centralizado con un antipatrón intencional:
-separa los eventos en 4 tablas (`create_events`, `update_events`,
-`delete_events`, `query_events`) en lugar de una tabla unificada con columna
-`action`. Se identificaron y corrigieron **6 incidencias** distribuidas en los
-6 endpoints publicados, clasificadas en los 4 tipos de mantenimiento.
+El CRUD de plantas envia eventos `CREATE`, `QUERY`, `UPDATE` y `DELETE` al hub usando `POST /events`.
 
----
+## 1. Mantenimiento correctivo
 
-## TAREA 1 — INTEGRACIÓN
+**Endpoint afectado:** `POST /events`
 
-### Sistema CRUD: Catálogo de Plantas de Interior
+### Incidencia tecnica
 
-**Tecnologías:** Node.js + Express + SQLite (better-sqlite3)  
-**Puerto:** 4000  
-**Event Manager URL:** http://localhost:3000
+Los eventos `DELETE` respondian como exitosos, pero no se guardaban en la base de datos. En `events.service.ts`, el codigo construia la entidad con `this.deleteRepo.create(...)`, pero retornaba `{ ok: true }` antes de ejecutar `save`.
 
-**Verificación de los 6 endpoints del hub:**
+### Antes
 
-| Endpoint                   | Estado | Incidencia detectada          |
-|----------------------------|--------|-------------------------------|
-| POST /events               | ⚠️     | Switch case-sensitive (bug)   |
-| GET /events                | ⚠️     | Fechas sin formato ISO 8601   |
-| GET /health                | ⚠️     | Respuesta no cumple estándar  |
-| GET /stats                 | ⚠️     | Carga toda la BD en memoria   |
-| GET /events/source/:source | ⚠️     | Consultas secuenciales        |
-| GET /events/entity/:entity | ⚠️     | Sin validación del parámetro  |
-
----
-
-## TAREA 2 — MANTENIMIENTO CORRECTIVO 🐞
-
-### Incidencia
-**Endpoint:** `POST /events`  
-**Síntoma:** Los eventos enviados desde el CRUD nunca aparecen en la BD.
-Al consultar `GET /events` el historial está vacío a pesar de que el CRUD
-ejecuta operaciones exitosamente.
-
-### Causa técnica
-El método `registerEvent` en `events.service.ts` usa un `switch` que compara
-`dto.action` con cadenas en **minúsculas** (`'create'`, `'update'`...), pero
-el contrato del API define el campo `action` en **MAYÚSCULAS**. JavaScript
-distingue mayúsculas, por lo que ningún `case` coincide y se lanza una
-excepción en el bloque `default`.
-
-### Código ANTES (con bug)
-```typescript
-switch (dto.action) {
-  case 'create':   // ❌ 'CREATE' !== 'create'
-    return this.createRepo.save(eventData);
-  case 'update':   // ❌ Nunca coincide
-    return this.updateRepo.save(eventData);
-  case 'delete':
-    return this.deleteRepo.save(eventData);
-  case 'query':
-    return this.queryRepo.save(eventData);
-  default:
-    throw new Error('Acción no reconocida');
+```ts
+if (action === 'DELETE') {
+  this.deleteRepo.create({
+    source: dto.source,
+    entity: dto.entity,
+    action: dto.action,
+    title: dto.title,
+    payload: payloadStr,
+    createdAt: localDate,
+  });
+  return { ok: true };
 }
 ```
 
-### Código DESPUÉS (corregido)
-```typescript
-const action = dto.action.toUpperCase();  // ✅ Normalizar antes de comparar
+### Despues
 
-switch (action) {
-  case 'CREATE':
-    return this.createRepo.save(eventData);
-  case 'UPDATE':
-    return this.updateRepo.save(eventData);
-  case 'DELETE':
-    return this.deleteRepo.save(eventData);
-  case 'QUERY':
-    return this.queryRepo.save(eventData);
-  default:
-    throw new BadRequestException(`Acción no reconocida: ${dto.action}`);
+```ts
+if (action === 'DELETE') {
+  const ev = this.deleteRepo.create({
+    source: dto.source,
+    entity: dto.entity,
+    action,
+    title: dto.title,
+    payload: payloadStr,
+    createdAt: recordedAt,
+  });
+  await this.deleteRepo.save(ev);
+  return { ok: true, action };
 }
 ```
 
-### Clasificación
-**Tipo:** Mantenimiento **Correctivo**  
-**Justificación:** Se corrigió un fallo en tiempo de ejecución que impedía que
-los eventos se persistieran. La corrección no alteró el contrato del API ni
-introdujo regresiones en otros endpoints.
+### Justificacion
 
-### Evidencia
-| | Resultado |
-|---|---|
-| ANTES | `POST /events { "action": "CREATE" }` → 500 Error / tabla vacía |
-| DESPUÉS | `POST /events { "action": "CREATE" }` → 201 Created / registro guardado |
+Es mantenimiento correctivo porque corrige un fallo real de ejecucion: el sistema reportaba exito, pero perdia eventos `DELETE`. La intervencion estabiliza el comportamiento sin cambiar el contrato externo del API.
 
----
+## 2. Mantenimiento adaptativo
 
-## TAREA 3 — MANTENIMIENTO ADAPTATIVO ⚙️
+**Endpoints afectados:** `GET /health`, `GET /events`, `POST /events`
 
-### Incidencia
-**Endpoints:** `GET /health` y `GET /events`  
-**Contexto:** La EPN implementó un nuevo estándar para todos sus sistemas:
-1. El endpoint `/health` debe retornar `{ status: 'UP', timestamp, version }`
-2. Todas las fechas deben estar en formato **ISO 8601 UTC** (`2025-05-03T14:30:00.000Z`)
+### Incidencia tecnica
 
-### Código ANTES
-```typescript
-// health endpoint
-@Get('health')
-getHealth() {
-  return { status: 'ok' };  // ❌ No cumple el estándar
-}
+El entorno institucional exige fechas ISO 8601 UTC y respuesta de salud con `status: "UP"`, `timestamp`, `version` y `service`. El hub devolvia `status: "ok"` y guardaba fechas locales con `toLocaleString()`.
 
-// findAll — fechas sin normalizar
-async findAll() {
-  const [creates, updates, deletes, queries] = await Promise.all([...]);
-  return [...creates, ...updates, ...deletes, ...queries];
-  // ❌ Las fechas vienen como "2025-05-03 14:30:00" (formato SQLite)
-}
+### Antes
+
+```ts
+return { status: 'ok', timestamp: new Date().toLocaleString() };
 ```
 
-### Código DESPUÉS
-```typescript
-// health endpoint
-@Get('health')
-getHealth() {
-  return {
-    status: 'UP',                        // ✅ Estándar EPN
-    timestamp: new Date().toISOString(), // ✅ ISO 8601 UTC
-    version: '1.0.0',
-    service: 'epn-event-manager',
-  };
-}
-
-// findAll — fechas normalizadas
-private toISO(dateStr: string): string {
-  return dateStr ? new Date(dateStr).toISOString() : null;
-}
-
-async findAll() {
-  const [creates, updates, deletes, queries] = await Promise.all([...]);
-  return [...creates, ...updates, ...deletes, ...queries]
-    .map(e => ({ ...e, createdAt: this.toISO(e.createdAt) }));  // ✅
-}
+```ts
+const localDate = new Date().toLocaleString();
 ```
 
-### Clasificación
-**Tipo:** Mantenimiento **Adaptativo**  
-**Justificación:** No existía un bug lógico; el sistema operaba según su diseño
-original. El cambio fue provocado por una **nueva regla del entorno externo**
-(estándar de fechas ISO 8601 y nuevo contrato del endpoint `/health` definido
-por la institución). La adaptación garantiza que los CRUDs clientes siguen
-pudiendo integrarse sin cambios en su código.
+### Despues
 
-### Evidencia
-| | Resultado |
-|---|---|
-| ANTES | `GET /health` → `{ "status": "ok" }` |
-| DESPUÉS | `GET /health` → `{ "status": "UP", "timestamp": "2025-05-03T14:30:00.000Z", "version": "1.0.0" }` |
-| ANTES | fechas en eventos: `"2025-05-03 14:30:00"` |
-| DESPUÉS | fechas en eventos: `"2025-05-03T14:30:00.000Z"` |
-
----
-
-## TAREA 4 — MANTENIMIENTO PERFECTIVO 📈
-
-### Incidencia
-**Endpoint:** `GET /stats`  
-**Síntoma:** El endpoint es funcional pero extremadamente ineficiente. Carga
-todos los registros de las 4 tablas en memoria RAM solo para contarlos.
-
-### Análisis de rendimiento
-Con 10 000 eventos en BD:
-- **Antes:** ~180ms (carga 10 000 objetos TypeORM completos en RAM)
-- **Después:** ~8ms (4 queries `COUNT(*)` que devuelven un número)
-- **Mejora:** 22× más rápido, sin importar el volumen de datos
-
-### Código ANTES
-```typescript
-async getStats() {
-  const creates = await this.createRepo.find();  // ❌ Carga TODOS los registros
-  const updates = await this.updateRepo.find();
-  const deletes = await this.deleteRepo.find();
-  const queries = await this.queryRepo.find();
-
-  return {
-    totalEvents: creates.length + updates.length + deletes.length + queries.length,
-    byType: { create: creates.length, update: updates.length, ... }
-  };
-}
+```ts
+return {
+  status: 'UP',
+  service: 'epn-event-manager',
+  version: '1.0.0',
+  timestamp: new Date().toISOString(),
+};
 ```
 
-### Código DESPUÉS
-```typescript
-async getStats() {
-  // ✅ COUNT a nivel SQL: retorna solo un número, sin hidratar objetos
-  const [createCount, updateCount, deleteCount, queryCount] = await Promise.all([
-    this.createRepo.count(),
-    this.updateRepo.count(),
-    this.deleteRepo.count(),
-    this.queryRepo.count(),
-  ]);
-
-  const total = createCount + updateCount + deleteCount + queryCount;
-
-  return {
-    totalEvents: total,
-    byType: { create: createCount, update: updateCount, delete: deleteCount, query: queryCount },
-    // ✅ Valor agregado: porcentajes sin costo adicional
-    percentages: {
-      create: total > 0 ? ((createCount / total) * 100).toFixed(1) + '%' : '0%',
-      update: total > 0 ? ((updateCount / total) * 100).toFixed(1) + '%' : '0%',
-      delete: total > 0 ? ((deleteCount / total) * 100).toFixed(1) + '%' : '0%',
-      query:  total > 0 ? ((queryCount  / total) * 100).toFixed(1) + '%' : '0%',
-    },
-    generatedAt: new Date().toISOString(),
-  };
-}
+```ts
+const recordedAt = new Date().toISOString();
 ```
 
-### Clasificación
-**Tipo:** Mantenimiento **Perfectivo**  
-**Justificación:** El sistema no tenía un error funcional observable: `/stats`
-devolvía resultados correctos. La mejora optimiza el **rendimiento interno**
-reemplazando la carga masiva en memoria por operaciones `COUNT()` a nivel de
-BD. Además se añaden porcentajes como **funcionalidad de valor agregado**.
-El contrato del endpoint no cambió (mismos campos + nuevos opcionales).
+### Justificacion
 
-### Evidencia
-| | Resultado |
-|---|---|
-| ANTES | `GET /stats` con 10k eventos → ~180ms, ~5MB RAM |
-| DESPUÉS | `GET /stats` con 10k eventos → ~8ms, <1KB RAM |
+Es mantenimiento adaptativo porque el sistema se ajusta a una nueva regla externa del entorno: formato UTC ISO 8601 y contrato estandar para monitoreo. No nace de un bug funcional interno, sino de compatibilidad con el nuevo contexto.
 
----
+## 3. Mantenimiento perfectivo
 
-## TAREA 5 — MANTENIMIENTO PREVENTIVO 🛡️
+**Endpoints afectados:** `GET /stats`, `GET /events/source/:source`, `GET /events/entity/:entity`
 
-### Incidencia
-**Endpoints:** `POST /events` y `GET /events/entity/:entity`  
-**Riesgo:** El DTO de creación de eventos no tiene ningún decorador de
-validación. Ante un payload malformado, el sistema lanza un error 500 genérico
-en lugar de un 400 descriptivo, y puede corromperse la BD con datos inválidos.
+### Incidencia tecnica
 
-### Fragilidades identificadas
-1. Campos requeridos pueden llegar vacíos o nulos
-2. `title` y `description` sin límite → strings de megabytes colapsan SQLite
-3. `action` sin validación → valores inválidos causan error en el switch
-4. `GET /events/entity/:entity` sin validación del parámetro de ruta
+`GET /stats` no contaba la tabla `query_events`, por lo que la metrica total quedaba incompleta. Ademas, algunas consultas a las cuatro tablas se ejecutaban de forma secuencial, aumentando la latencia.
 
-### Código ANTES
-```typescript
-// Sin ninguna validación
+### Antes
+
+```ts
+const createCount = await this.createRepo.count();
+const updateCount = await this.updateRepo.count();
+const deleteCount = await this.deleteRepo.count();
+
+return {
+  create: createCount,
+  update: updateCount,
+  delete: deleteCount,
+  total: createCount + updateCount + deleteCount,
+};
+```
+
+### Despues
+
+```ts
+const [createCount, updateCount, deleteCount, queryCount] = await Promise.all([
+  this.createRepo.count(),
+  this.updateRepo.count(),
+  this.deleteRepo.count(),
+  this.queryRepo.count(),
+]);
+
+const total = createCount + updateCount + deleteCount + queryCount;
+```
+
+Tambien se agregaron:
+
+```ts
+totalEvents: total,
+byType: { create: createCount, update: updateCount, delete: deleteCount, query: queryCount },
+percentages: {
+  create: this.percent(createCount, total),
+  update: this.percent(updateCount, total),
+  delete: this.percent(deleteCount, total),
+  query: this.percent(queryCount, total),
+},
+generatedAt: new Date().toISOString(),
+```
+
+### Justificacion
+
+Es mantenimiento perfectivo porque mejora una funcion existente: las estadisticas ahora son mas completas, mas utiles y se calculan en paralelo. El endpoint sigue cumpliendo su objetivo original, pero aporta mas valor y mejor rendimiento.
+
+## 4. Mantenimiento preventivo
+
+**Endpoints afectados:** `POST /events`, `GET /events/entity/:entity`
+
+### Incidencia tecnica
+
+El DTO de eventos no validaba campos requeridos, longitudes ni acciones permitidas. Un payload vacio, un `action` invalido o textos demasiado largos podian generar errores 500 o registros inconsistentes.
+
+### Antes
+
+```ts
 export class CreateEventDto {
-  source:      string;  // ❌ Puede ser null
-  entity:      string;
-  action:      string;  // ❌ Puede ser "EXPLOTAR"
-  title:       string;  // ❌ Sin límite de longitud
-  description: string;
-  payload:     any;     // ❌ Sin límite de tamaño
-}
-```
-
-### Código DESPUÉS
-```typescript
-import { IsString, IsNotEmpty, IsIn, MaxLength, IsObject, IsOptional } from 'class-validator';
-
-export class CreateEventDto {
-  @IsString() @IsNotEmpty() @MaxLength(100)
   source: string;
-
-  @IsString() @IsNotEmpty() @MaxLength(50)
   entity: string;
+  action: string;
+  title: string;
+  description: string;
+  payload: any;
+}
+```
+
+### Despues
+
+```ts
+export class CreateEventDto {
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(100)
+  source: string;
 
   @IsString()
   @IsIn(['CREATE', 'UPDATE', 'DELETE', 'QUERY'])
   action: string;
 
-  @IsString() @IsNotEmpty() @MaxLength(200)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(200)
   title: string;
 
-  @IsString() @IsOptional() @MaxLength(500)
-  description?: string;
-
   @IsObject()
-  payload: Record<string, any>;
+  payload: Record<string, unknown>;
 }
-
-// main.ts — ValidationPipe global
-app.useGlobalPipes(new ValidationPipe({
-  whitelist: true,
-  forbidNonWhitelisted: true,
-  transform: true,
-}));
-
-// Límite de tamaño del body
-app.use(express.json({ limit: '256kb' }));
 ```
 
-### Clasificación
-**Tipo:** Mantenimiento **Preventivo**  
-**Justificación:** No existe un fallo activo. Sin embargo, en un entorno donde
-múltiples CRUDs envían eventos simultáneamente, un payload malformado o
-demasiado grande puede silenciosamente corromper registros o agotar la memoria
-del proceso. Las validaciones implementadas **reducen el riesgo operativo**
-antes de que se materialice en producción.
+En `main.ts`:
 
-### Evidencia
-| | Resultado |
-|---|---|
-| ANTES | `POST /events {}` → 500 Internal Server Error |
-| DESPUÉS | `POST /events {}` → 400 con lista detallada de errores |
-| ANTES | `POST /events { "title": "<10MB string>" }` → crash OOM |
-| DESPUÉS | `POST /events { "title": "<10MB string>" }` → 400 "title máx 200 chars" |
+```ts
+app.use(json({ limit: '256kb' }));
+app.useGlobalPipes(
+  new ValidationPipe({
+    whitelist: true,
+    forbidNonWhitelisted: true,
+    transform: true,
+  }),
+);
+```
 
----
+En `events.controller.ts`:
 
-## CONCLUSIÓN
+```ts
+if (!normalizedEntity) {
+  throw new BadRequestException('entity no puede estar vacio');
+}
 
-Se aplicaron los **4 tipos de mantenimiento** sobre el EPN Event Manager,
-cubriendo las 6 incidencias distribuidas en los 6 endpoints:
+if (normalizedEntity.length > 50) {
+  throw new BadRequestException('entity no puede superar 50 caracteres');
+}
+```
 
-| Tipo          | Endpoint(s) afectado(s)         | Cambio realizado                         |
-|---------------|---------------------------------|------------------------------------------|
-| Correctivo    | POST /events                    | Normalizar action a mayúsculas en switch |
-| Adaptativo    | GET /health, GET /events        | ISO 8601, formato estándar EPN           |
-| Perfectivo    | GET /stats, GET /events/source  | COUNT SQL, Promise.all paralelo          |
-| Preventivo    | POST /events, GET /events/entity| DTOs validados, ValidationPipe, límites  |
+### Justificacion
 
-El CRUD de **Catálogo de Plantas de Interior** envía los 4 tipos de eventos
-(CREATE, UPDATE, DELETE, QUERY) al hub corregido y verifica su registro
-exitoso en el historial de eventos.
+Es mantenimiento preventivo porque reduce riesgos futuros antes de que el sistema falle en produccion. Las validaciones evitan datos corruptos, campos gigantes y errores 500 dificiles de diagnosticar.
+
+## Prueba de vida
+
+1. Levantar el hub:
+
+```bash
+cd epn-event-manager
+npm run start:dev
+```
+
+2. Levantar el CRUD:
+
+```bash
+cd crud-plantas
+python crud_plantas.py
+```
+
+3. Abrir `http://localhost:4000` y ejecutar:
+
+- Crear una planta.
+- Listar plantas.
+- Actualizar una planta.
+- Eliminar una planta.
+
+4. Verificar en el hub:
+
+```bash
+curl http://localhost:3000/events/source/crud-plantas
+curl http://localhost:3000/stats
+curl http://localhost:3000/health
+```
+
+## Conclusion
+
+Se implementaron los cuatro tipos de mantenimiento solicitados. El CRUD de plantas demuestra integracion real con el hub y el Event Manager queda mas estable, compatible, util y robusto frente a entradas invalidas.

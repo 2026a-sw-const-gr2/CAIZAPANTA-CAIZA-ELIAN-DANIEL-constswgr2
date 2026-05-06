@@ -4,7 +4,11 @@ import { Controller, Get } from '@nestjs/common';
 export class HealthController {
   @Get()
   check() {
-    // Incidencia preventiva: siempre responde ok sin verificar conectividad real
-    return { status: 'ok', timestamp: new Date().toLocaleString() };
+    return {
+      status: 'UP',
+      service: 'epn-event-manager',
+      version: '1.0.0',
+      timestamp: new Date().toISOString(),
+    };
   }
 }

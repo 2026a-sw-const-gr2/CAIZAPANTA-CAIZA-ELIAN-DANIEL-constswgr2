@@ -1,4 +1,11 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import {
+  BadRequestException,
+  Body,
+  Controller,
+  Get,
+  Param,
+  Post,
+} from '@nestjs/common';
 import { EventsService } from './events.service';
 import { CreateEventDto } from './dto/create-event.dto';
 
@@ -23,6 +30,16 @@ export class EventsController {
 
   @Get('entity/:entity')
   findByEntity(@Param('entity') entity: string) {
-    return this.eventsService.findByEntity(entity);
+    const normalizedEntity = entity.trim();
+
+    if (!normalizedEntity) {
+      throw new BadRequestException('entity no puede estar vacio');
+    }
+
+    if (normalizedEntity.length > 50) {
+      throw new BadRequestException('entity no puede superar 50 caracteres');
+    }
+
+    return this.eventsService.findByEntity(normalizedEntity);
   }
 }

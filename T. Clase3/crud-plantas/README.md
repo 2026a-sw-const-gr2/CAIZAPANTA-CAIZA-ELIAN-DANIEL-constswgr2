@@ -1,147 +1,110 @@
-# 🌱 Catálogo de Plantas de Interior — CRUD EPN FIS
+# Catalogo de Plantas de Interior - CRUD EPN FIS
 
-**Taller:** Construcción de Software — Mantenimiento  
-**Tema:** Gestión de Plantas de Interior  
-**Framework:** Python 3 + Flask + SQLite (built-in)  
-**Integración:** EPN Event Manager Hub
+**Taller:** Construccion de Software - Mantenimiento  
+**Tema:** Gestion de Plantas de Interior  
+**Framework:** Python 3 + Flask + SQLite  
+**Integracion:** EPN Event Manager Hub por `POST /events`
 
----
-
-## Instalación rápida
+## Instalacion rapida
 
 ```bash
-# 1. Instalar dependencias (solo 2 paquetes)
 pip install flask requests
-
-# 2. Levantar el Event Manager primero en otro terminal
-#    (clonar el repo del profesor → seguir sus instrucciones)
-
-# 3. Iniciar el CRUD
 python crud_plantas.py
 ```
 
-El CRUD queda en: **http://localhost:4000**
+El CRUD queda disponible en:
 
-> **Variables de entorno opcionales:**
-> ```bash
-> PORT=4000 EVENT_MANAGER_URL=http://localhost:3000 python crud_plantas.py
-> ```
+- Interfaz web: `http://localhost:4000`
+- API REST: `http://localhost:4000/plantas`
+- Health check: `http://localhost:4000/health`
 
----
+Antes de probar la integracion completa, levantar tambien el hub:
+
+```bash
+cd ../epn-event-manager
+npm install
+npm run start:dev
+```
 
 ## Entidad: Planta de Interior
 
-| Campo            | Tipo   | Req | Descripción                             |
-|------------------|--------|-----|-----------------------------------------|
-| id               | int    | auto| Clave primaria                          |
-| nombre           | string | ✅  | Nombre de la planta (ej: "Pothos")      |
-| tipo             | string | ✅  | Categoría (Tropical, Suculenta, etc)    |
-| frecuencia_riego | string | ✅  | Frecuencia de riego (ej: "Cada 7 días") |
-| luz_requerida    | string | ✅  | Luz necesaria (ej: "Luz indirecta")     |
-| descripcion      | string | ❌  | Descripción opcional                    |
-| created_at       | date   | auto| Fecha de creación                       |
-| updated_at       | date   | auto| Última modificación                     |
-
----
+| Campo | Tipo | Requerido | Descripcion |
+| --- | --- | --- | --- |
+| `id` | int | auto | Clave primaria |
+| `nombre` | string | si | Nombre de la planta |
+| `tipo` | string | si | Categoria, por ejemplo Tropical o Suculenta |
+| `frecuencia_riego` | string | si | Frecuencia de riego |
+| `luz_requerida` | string | si | Tipo de luz necesaria |
+| `descripcion` | string | no | Detalle opcional |
+| `created_at` | ISO date | auto | Fecha de creacion |
+| `updated_at` | ISO date | auto | Ultima modificacion |
 
 ## Endpoints
 
-### `POST /plantas` — Crear planta
-```bash
-curl -X POST http://localhost:4000/plantas \
-  -H "Content-Type: application/json" \
-  -d '{
-    "nombre": "Pothos Dorado",
-    "tipo": "Tropical",
-    "frecuencia_riego": "Cada 7 días",
-    "luz_requerida": "Luz indirecta media",
-    "descripcion": "Muy resistente, ideal para interiores"
-  }'
-```
-→ Envía evento **CREATE** al hub
+### Crear planta
 
----
-
-### `GET /plantas` — Listar todas
-```bash
-curl http://localhost:4000/plantas
-```
-→ Envía evento **QUERY** al hub
-
----
-
-### `GET /plantas/<id>` — Obtener una
-```bash
-curl http://localhost:4000/plantas/1
-```
-→ Envía evento **QUERY** al hub
-
----
-
-### `PUT /plantas/<id>` — Actualizar
-```bash
-curl -X PUT http://localhost:4000/plantas/1 \
-  -H "Content-Type: application/json" \
-  -d '{"frecuencia_riego": "Cada 10 días"}'
-```
-→ Envía evento **UPDATE** al hub (incluye estado antes/después)
-
----
-
-### `DELETE /plantas/<id>` — Eliminar
-```bash
-curl -X DELETE http://localhost:4000/plantas/1
-```
-→ Envía evento **DELETE** al hub
-
----
-
-### `GET /health` — Estado del servicio
-```bash
-curl http://localhost:4000/health
-```
-```json
-{ "status": "UP", "service": "crud-plantas", "version": "1.0.0", "timestamp": "..." }
+```powershell
+curl.exe -X POST http://localhost:4000/plantas -H "Content-Type: application/json" -d "{\"nombre\":\"Pothos Dorado\",\"tipo\":\"Tropical\",\"frecuencia_riego\":\"Cada 7 dias\",\"luz_requerida\":\"Luz indirecta\",\"descripcion\":\"Ideal para interiores\"}"
 ```
 
----
+Envia evento `CREATE` al Event Manager.
 
-## Evento enviado al hub (ejemplo)
+### Listar plantas
+
+```powershell
+curl.exe http://localhost:4000/plantas
+```
+
+Envia evento `QUERY` al Event Manager.
+
+### Obtener una planta
+
+```powershell
+curl.exe http://localhost:4000/plantas/1
+```
+
+Envia evento `QUERY` al Event Manager.
+
+### Actualizar planta
+
+```powershell
+curl.exe -X PUT http://localhost:4000/plantas/1 -H "Content-Type: application/json" -d "{\"frecuencia_riego\":\"Cada 10 dias\"}"
+```
+
+Envia evento `UPDATE` con el estado antes y despues.
+
+### Eliminar planta
+
+```powershell
+curl.exe -X DELETE http://localhost:4000/plantas/1
+```
+
+Envia evento `DELETE` con los datos eliminados.
+
+## Evento enviado al hub
 
 ```json
 {
   "source": "crud-plantas",
   "entity": "plant",
   "action": "CREATE",
-  "title": "Planta registrada en catálogo",
-  "description": "Se registró la planta \"Pothos Dorado\" de tipo \"Tropical\"",
+  "title": "Planta registrada en catalogo",
+  "description": "Se registro la planta Pothos Dorado de tipo Tropical",
   "payload": {
     "id": 1,
     "nombre": "Pothos Dorado",
-    "tipo": "Tropical",
-    "frecuencia_riego": "Cada 7 días",
-    "luz_requerida": "Luz indirecta media",
-    "descripcion": "Muy resistente"
+    "tipo": "Tropical"
   }
 }
 ```
 
----
+## Verificar integracion
 
-## Verificar integración
+Con ambos servidores activos:
 
-Con el Event Manager corriendo, después de operar el CRUD:
-
-```bash
-# Ver todos los eventos registrados
-curl http://localhost:3000/events
-
-# Ver solo eventos de este CRUD
-curl http://localhost:3000/events/source/crud-plantas
-
-# Ver solo eventos de la entidad plant
-curl http://localhost:3000/events/entity/plant
-
-# Estadísticas generales
-curl http://localhost:3000/stats
+```powershell
+curl.exe http://localhost:3000/events
+curl.exe http://localhost:3000/events/source/crud-plantas
+curl.exe http://localhost:3000/events/entity/plant
+curl.exe http://localhost:3000/stats
 ```
